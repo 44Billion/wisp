@@ -28,6 +28,44 @@ export function hasExtension() {
   return !!window.nostr;
 }
 
+function initializeIdentity(pk) {
+  if (!/^[0-9a-f]{64}$/.test(pk)) throw new Error("Invalid Nostr public key");
+
+  setPubkey(pk);
+  setLoginState("logged-in");
+  localStorage.setItem("wisp:pubkey", pk);
+  fetchUserProfile(pk);
+
+  import("./outbox").then(({ initFollowFeed }) => initFollowFeed(pk));
+  import("./relays").then(({ fetchOwnRelayLists }) =>
+    fetchOwnRelayLists(pk).then(() =>
+      import("./interests").then(({ fetchInterestSets }) => fetchInterestSets(pk))
+    )
+  );
+  import("./wallet").then(({ initWallet }) => initWallet(pk));
+  import("./notifications").then(({ initNotifications }) => initNotifications(pk));
+  import("./emojis").then(({ fetchUserEmojiList }) => fetchUserEmojiList(pk));
+  import("./blocklist").then(({ initBlocklist }) => initBlocklist());
+
+  return pk;
+}
+
+let managedLoginPending = false;
+
+async function restoreManagedLogin() {
+  if (pubkey() || managedLoginPending || typeof window.nostr?.peekPublicKey !== "function") return;
+
+  managedLoginPending = true;
+  try {
+    const pk = await window.nostr.peekPublicKey();
+    if (!pubkey() && /^[0-9a-f]{64}$/.test(pk || "")) initializeIdentity(pk);
+  } catch {
+    // Silent discovery must not affect the manual login flow.
+  } finally {
+    managedLoginPending = false;
+  }
+}
+
 export async function login() {
   if (!window.nostr) {
     throw new Error("No Nostr extension found. Install nos2x, Alby, or another NIP-07 extension.");
@@ -37,24 +75,7 @@ export async function login() {
 
   try {
     const pk = await window.nostr.getPublicKey();
-    setPubkey(pk);
-    setLoginState("logged-in");
-    localStorage.setItem("wisp:pubkey", pk);
-    fetchUserProfile(pk);
-
-    // Start outbox pipeline immediately so feed data flows before user navigates
-    import("./outbox").then(({ initFollowFeed }) => initFollowFeed(pk));
-    import("./relays").then(({ fetchOwnRelayLists }) =>
-      fetchOwnRelayLists(pk).then(() =>
-        import("./interests").then(({ fetchInterestSets }) => fetchInterestSets(pk))
-      )
-    );
-    import("./wallet").then(({ initWallet }) => initWallet(pk));
-    import("./notifications").then(({ initNotifications }) => initNotifications(pk));
-     import("./emojis").then(({ fetchUserEmojiList }) => fetchUserEmojiList(pk));
-     import("./blocklist").then(({ initBlocklist }) => initBlocklist());
-
-    return pk;
+    return initializeIdentity(pk);
   } catch (err) {
     setLoginState("logged-out");
     throw err;
@@ -74,21 +95,16 @@ export function logout() {
   import("./notifications").then(({ clearNotifications }) => clearNotifications());
   import("./emojis").then(({ clearEmojiState }) => clearEmojiState());
   import("./interests").then(({ clearInterestState }) => clearInterestState());
+
+  void restoreManagedLogin();
 }
 
 // Restore session on page load
-if (stored) {
-  fetchUserProfile(stored);
-  import("./outbox").then(({ initFollowFeed }) => initFollowFeed(stored));
-  import("./relays").then(({ fetchOwnRelayLists }) =>
-    fetchOwnRelayLists(stored).then(() =>
-      import("./interests").then(({ fetchInterestSets }) => fetchInterestSets(stored))
-    )
-  );
-  import("./wallet").then(({ initWallet }) => initWallet(stored));
-  import("./notifications").then(({ initNotifications }) => initNotifications(stored));
-   import("./emojis").then(({ fetchUserEmojiList }) => fetchUserEmojiList(stored));
-   import("./blocklist").then(({ initBlocklist }) => initBlocklist());
+if (/^[0-9a-f]{64}$/.test(stored || "")) {
+  initializeIdentity(stored);
+} else {
+  if (stored) localStorage.removeItem("wisp:pubkey");
+  void restoreManagedLogin();
 }
 
 function fetchUserProfile(pk) {
